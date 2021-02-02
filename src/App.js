@@ -4,7 +4,7 @@ import "./styles.css"
 import Util from "./util"
 
 const DEBUG = false
-const DISPLAY_SHEET_JSON = false
+const DISPLAY_SHEET_JSON = true
 
 // Keep in mind that this feature might be generally faster than a full
 // cloning, but tends to make garbage collection harder.
@@ -13,7 +13,7 @@ const ENABLE_SELECTIVE_CLONING = false
 // https://en.wikipedia.org/wiki/Observer_pattern
 class Cell {
   constructor(refOrCoords, value, sheet) {
-    this.ref = Util.refOrCoordsAsRef(refOrCoords)
+    this.ref = Util.asRef(refOrCoords)
     this.sheet = sheet
     this.subjects = new Set() // Cells who I watch for changes.
     this.observers = new Set() // Cells who watch me for changes.
@@ -132,29 +132,60 @@ class Cell {
     return newCell
   }
 
-  // TODO: Atualizar refs dentro de ranges que estiverem sendo movidos
-  // na mesma operação.
-  moveTo(targetRef) {
+  moveTo(targetRef, sourceRefs) {
     if (DEBUG) console.log(`Moving ${this.ref} to ${targetRef}`)
+
+    this.sheet.findOrCreateCell(targetRef).observers.forEach((ref) => {
+      const observer = this.sheet.findCell(ref)
+
+      observer.evaluated = false
+    })
 
     // Copy source cell raw/original value to current ref.
     const targetCell = this.sheet.updateOrCreateCell(targetRef, this.value)
 
     // For each observer of the source cell, update its references
-    // to its new position (current ref).
+    // to the subject's new position.
     this.observers.forEach((ref) => {
       const observer = this.sheet.findCell(ref)
+      let observerValue = observer.value
+      const ranges = new Set(Util.textScan(observerValue, Util.RANGE_REGEXP))
+
+      ranges.forEach((range) => {
+        const rangeCells = new Set(Util.expandRange(range).flat(2))
+        const rangeCellsNotInMove = Util.setDiff(
+          rangeCells,
+          new Set(sourceRefs)
+        )
+
+        // Are all cells within the range being moved in the same operation?
+        if (rangeCellsNotInMove.size === 0) {
+          if (DEBUG)
+            console.log(`Observer ${ref}: entire range ${range} being moved`)
+
+          const [fromRef, toRef] = range.split(":")
+          const newFromRef = Util.newRefForCopy(fromRef, this.ref, targetRef)
+          const newToRef = Util.newRefForCopy(toRef, this.ref, targetRef)
+
+          observerValue = observerValue.replace(
+            new RegExp(`\\b${range}\\b`, "g"),
+            [newFromRef, newToRef].join(":")
+          )
+        }
+      })
 
       if (DEBUG)
         console.log(
-          `Updating ${ref} references with current value ${observer.value}`
+          `Updating ${ref} references with current value ${observerValue}`
         )
 
       observer.setValue(
-        Util.templateReplaceForMove(observer.value, {
+        Util.templateReplaceForMove(observerValue, {
           [this.ref]: targetRef
         })
       )
+
+      observer.evaluated = false
     })
 
     // Assure the cell being moved is properly re-evaluated by setting
@@ -393,32 +424,30 @@ class Sheet {
   }
 
   findCell(refOrCoords) {
-    const ref = Util.refOrCoordsAsRef(refOrCoords)
+    const ref = Util.asRef(refOrCoords)
 
     return this.cells[ref]
   }
 
-  findOrCreateCell(refOrCoords, value) {
-    const { row, col } = Util.asCoords(refOrCoords)
-    const ref = Util.refOrCoordsAsRef(refOrCoords)
+  findOrCreateCell(refOrCoords, valueIfNew) {
+    const ref = Util.asRef(refOrCoords)
 
     const cell = (this.cells[ref] =
-      this.cells[ref] ?? new Cell([row, col], value, this))
+      this.cells[ref] ?? new Cell(ref, valueIfNew, this))
 
     return cell
   }
 
   // upsert operation
   updateOrCreateCell(refOrCoords, valueIfNew, descendantObservers) {
-    const { row, col } = Util.asCoords(refOrCoords)
-    const ref = Util.refOrCoordsAsRef(refOrCoords)
-
-    let cell = this.cells[ref]
+    let cell = this.findCell(refOrCoords)
 
     if (cell) {
       cell.setValue(valueIfNew, descendantObservers)
     } else {
-      cell = this.cells[ref] = new Cell([row, col], valueIfNew, this)
+      const ref = Util.asRef(refOrCoords)
+
+      cell = this.cells[ref] = new Cell(ref, valueIfNew, this)
     }
 
     return cell
@@ -489,27 +518,27 @@ class Sheet {
 //   D4: "=A1+1"
 // }
 
-const initialCellData = {
-  A1: 1,
-  B1: 2,
-  A2: 3,
-  B2: 4,
-  C1: "=SUM(A1:B1)",
-  C2: "=SUM(A2:B2)",
-  A3: "=SUM(A1:A2)",
-  B3: "=SUM(B1:B2)",
-  C3: "=SUM(A1:B2)"
-}
+// const initialCellData = {
+//   A1: 1,
+//   B1: 2,
+//   A2: 3,
+//   B2: 4,
+//   C1: "=SUM(A1:B1)",
+//   C2: "=SUM(A2:B2)",
+//   A3: "=SUM(A1:A2)",
+//   B3: "=SUM(B1:B2)",
+//   C3: "=SUM(A1:B2)"
+// }
 
 // const initialCellData = Util.generateCellSquares(4, "A1", 1)
 
-// const initialCellData = Util.generateSpiralSequence(
-//   10,
-//   "south",
-//   "left",
-//   [{ A1: 1 }],
-//   (_i, previousRefs, _nextRef) => `=${previousRefs[previousRefs.length - 1]}+1`
-// )
+const initialCellData = Util.generateSpiralSequence(
+  10,
+  "south",
+  "left",
+  [{ A1: 1 }],
+  (_i, previousRefs, _nextRef) => `=${previousRefs[previousRefs.length - 1]}+1`
+)
 
 // const initialCellData = Util.generateSpiralSequence(
 //   5,
@@ -565,8 +594,7 @@ const Spreadsheet = (props) => {
   const HEADER_LIMITS = { rows: 15, cols: 5 }
 
   const [sheet, setSheet] = useState(initialSheet)
-  const [clipboard, setClipboard] = useState(null)
-  const [clipboardAction, setClipboardAction] = useState(null)
+  const [clipboard, setClipboard] = useState({ range: null, action: null })
   const [selectedRangeCorner1, setSelectedRangeCorner1] = useState(null)
   const [selectedRangeCorner2, setSelectedRangeCorner2] = useState(null)
   const cellsRef = useRef({})
@@ -583,15 +611,56 @@ const Spreadsheet = (props) => {
   }
 
   // useEffect(() => {
-  //   setTimeout(() => {
-  //     gotoCell("A1")
-  //   }, 0)
+  //   _gotoCell("A1")
   // }, [])
+
+  let selectedRange
+
+  if (selectedRangeCorner1 && selectedRangeCorner2) {
+    const { row: corner1Row, col: corner1Col } = Util.asCoords(
+      selectedRangeCorner1
+    )
+    const { row: corner2Row, col: corner2Col } = Util.asCoords(
+      selectedRangeCorner2
+    )
+
+    let rangeCorners
+
+    if (corner1Row <= corner2Row) {
+      if (corner1Col <= corner2Col) {
+        // Corner 2 is below (or at the same row) and to the right (or at the same col) of corner 1.
+        rangeCorners = [selectedRangeCorner1, selectedRangeCorner2]
+      } else {
+        // Corner 2 is below (or at the same row) and to the left of corner 1.
+        rangeCorners = [
+          Util.asRef([corner1Row, corner2Col]),
+          Util.asRef([corner2Row, corner1Col])
+        ]
+      }
+    } else {
+      if (corner1Col <= corner2Col) {
+        // Corner 2 is above and to the right (or at the same col) of corner 1.
+        rangeCorners = [
+          Util.asRef([corner2Row, corner1Col]),
+          Util.asRef([corner1Row, corner2Col])
+        ]
+      } else {
+        // Corner 2 is above and to the left of corner 1.
+        rangeCorners = [selectedRangeCorner2, selectedRangeCorner1]
+      }
+    }
+
+    selectedRange = rangeCorners.join(":")
+  }
+
+  const selectedRangeRefs = selectedRange
+    ? Util.expandRange(selectedRange).flat(2)
+    : []
 
   const handleCellInputKeyDown = (ref) => (event) => {
     const { target, key } = event
-    // const isTextSelected = target.selectionStart < target.selectionEnd
-    const textFullySelected =
+    const isTextSelected = target.selectionStart < target.selectionEnd
+    const isTextFullySelected =
       target.selectionStart === 0 && target.selectionEnd === target.value.length
     const input = _cellInput(ref)
     const cell = sheet.findCell(ref)
@@ -604,12 +673,12 @@ const Spreadsheet = (props) => {
     const firstCol = 1
     const lastCol = dimensions[1]
 
-    const isFirstCell = () => row === firstCell[0] && col === firstCell[1]
-    const isLastCell = () => row === lastCell[0] && col === lastCell[1]
-    const isFirstRow = () => row === firstRow
-    const isLastRow = () => row === lastRow
-    const isFirstCol = () => col === firstCol
-    const isLastCol = () => col === lastCol
+    const isFirstCell = row === firstCell[0] && col === firstCell[1]
+    const isLastCell = row === lastCell[0] && col === lastCell[1]
+    const isFirstRow = row === firstRow
+    const isLastRow = row === lastRow
+    const isFirstCol = col === firstCol
+    const isLastCol = col === lastCol
 
     let destinationCoords
 
@@ -619,15 +688,16 @@ const Spreadsheet = (props) => {
         // Proceed only if Command or Control pressed.
         if (!event.metaKey && !event.ctrlKey) return
 
-        // Proceed only if no text selected.
-        // if (isTextSelected) return
+        // Proceed only if text is fully selected.
+        if (!isTextFullySelected) return
 
         event.preventDefault()
 
         // Copy currently selected range to clipboard.
-        setClipboard(selectedRange)
-        setClipboardAction({ c: "copy", x: "cut" }[key])
-        // setSelectedRange(null)
+        setClipboard({
+          range: selectedRange,
+          action: { c: "copy", x: "cut" }[key]
+        })
 
         break
 
@@ -635,12 +705,12 @@ const Spreadsheet = (props) => {
         // Proceed only if Command or Control pressed.
         if (!event.metaKey && !event.ctrlKey) return
 
-        // Proceed only if clipboard and clipboard action both not empty.
-        if (Util.isEmpty(clipboard) || Util.isEmpty(clipboardAction)) return
+        // Proceed only if clipboard not empty.
+        if (!clipboard.range || !clipboard.action) return
 
         event.preventDefault()
 
-        const sourceRefs = Util.expandRange(clipboard)
+        const sourceRefs = Util.expandRange(clipboard.range)
 
         setSheet((previousSheet) => {
           const sheetClone = previousSheet.clone()
@@ -651,16 +721,16 @@ const Spreadsheet = (props) => {
 
               if (!sourceCell) return
 
-              const targetRef = Util.asRef(row + rowIndex, col + colIndex)
+              const targetRef = Util.asRef([row + rowIndex, col + colIndex])
               let targetCell
 
-              switch (clipboardAction) {
+              switch (clipboard.action) {
                 case "copy":
                   targetCell = sourceCell.copyTo(targetRef)
                   break
 
                 case "cut":
-                  targetCell = sourceCell.moveTo(targetRef)
+                  targetCell = sourceCell.moveTo(targetRef, sourceRefs.flat(2))
 
                   _syncCellInput(sheetClone, sourceRef, sourceCell)
 
@@ -680,16 +750,15 @@ const Spreadsheet = (props) => {
           return sheetClone
         })
 
-        if (clipboardAction === "cut") {
-          // Clear the clipboard and clipboard action.
-          setClipboard(null)
-          setClipboardAction(null)
+        if (clipboard.action === "cut") {
+          // Clear the clipboard.
+          setClipboard({ range: null, action: null })
         }
 
         break
 
       case "Escape":
-        if (textFullySelected) {
+        if (isTextFullySelected) {
           // Allow the user to start editing the cell during navigation.
           document.getSelection().collapseToEnd()
         } else {
@@ -703,15 +772,15 @@ const Spreadsheet = (props) => {
 
         input.blur()
 
-        if (isLastCell()) {
+        if (isLastCell) {
           destinationCoords = firstCell
-        } else if (isLastRow()) {
+        } else if (isLastRow) {
           destinationCoords = [firstCol, col + 1]
         } else {
           destinationCoords = [row + 1, col]
         }
 
-        const destinationRef = Util.asRef(...destinationCoords)
+        const destinationRef = Util.asRef(destinationCoords)
 
         _gotoCell(destinationRef)
 
@@ -722,6 +791,9 @@ const Spreadsheet = (props) => {
       case "ArrowLeft":
       case "ArrowRight":
         if (event.shiftKey) {
+          // Proceed only if text is fully selected.
+          if (!isTextFullySelected) return
+
           event.preventDefault()
 
           let { row: corner2Row, col: corner2Col } = Util.asCoords(
@@ -744,9 +816,9 @@ const Spreadsheet = (props) => {
             default:
           }
 
-          setSelectedRangeCorner2(Util.asRef(corner2Row, corner2Col))
+          setSelectedRangeCorner2(Util.asRef([corner2Row, corner2Col]))
         } else {
-          if (!textFullySelected) return
+          if (!isTextFullySelected) return
 
           event.preventDefault()
 
@@ -754,9 +826,9 @@ const Spreadsheet = (props) => {
 
           switch (key) {
             case "ArrowDown":
-              if (isLastCell()) {
+              if (isLastCell) {
                 destinationCoords = firstCell
-              } else if (isLastRow()) {
+              } else if (isLastRow) {
                 destinationCoords = [firstRow, col + 1]
               } else {
                 destinationCoords = [row + 1, col]
@@ -765,9 +837,9 @@ const Spreadsheet = (props) => {
               break
 
             case "ArrowUp":
-              if (isFirstCell()) {
+              if (isFirstCell) {
                 destinationCoords = lastCell
-              } else if (isFirstRow()) {
+              } else if (isFirstRow) {
                 destinationCoords = [lastRow, col - 1]
               } else {
                 destinationCoords = [row - 1, col]
@@ -776,9 +848,9 @@ const Spreadsheet = (props) => {
               break
 
             case "ArrowLeft":
-              if (isFirstCell()) {
+              if (isFirstCell) {
                 destinationCoords = lastCell
-              } else if (isFirstCol()) {
+              } else if (isFirstCol) {
                 destinationCoords = [row - 1, lastCol]
               } else {
                 destinationCoords = [row, col - 1]
@@ -787,9 +859,9 @@ const Spreadsheet = (props) => {
               break
 
             case "ArrowRight":
-              if (isLastCell()) {
+              if (isLastCell) {
                 destinationCoords = firstCell
-              } else if (isLastCol()) {
+              } else if (isLastCol) {
                 destinationCoords = [row + 1, firstCol]
               } else {
                 destinationCoords = [row, col + 1]
@@ -800,7 +872,7 @@ const Spreadsheet = (props) => {
             default:
           }
 
-          const destinationRef = Util.asRef(...destinationCoords)
+          const destinationRef = Util.asRef(destinationCoords)
 
           _gotoCell(destinationRef)
         }
@@ -808,8 +880,8 @@ const Spreadsheet = (props) => {
         break
 
       case "Tab":
-        const isTabInLastCell = () => !event.shiftKey && isLastCell()
-        const isShiftTabInFirstCell = () => event.shiftKey && isFirstCell()
+        const isTabInLastCell = () => !event.shiftKey && isLastCell
+        const isShiftTabInFirstCell = () => event.shiftKey && isFirstCell
 
         if (isTabInLastCell() || isShiftTabInFirstCell()) {
           event.preventDefault()
@@ -817,8 +889,8 @@ const Spreadsheet = (props) => {
           input.blur()
 
           const destinationRef = isTabInLastCell()
-            ? Util.asRef(...firstCell)
-            : Util.asRef(...lastCell)
+            ? Util.asRef(firstCell)
+            : Util.asRef(lastCell)
 
           _gotoCell(destinationRef)
         }
@@ -909,54 +981,17 @@ const Spreadsheet = (props) => {
   }
 
   const handleCellClick = (ref) => (event) => {
+    const refInSelectedRange = selectedRangeRefs.indexOf(ref) >= 0
+
     setSelectedRangeCorner1(ref)
     setSelectedRangeCorner2(ref)
 
-    _gotoCell(ref, false)
-  }
-
-  let selectedRange
-
-  if (selectedRangeCorner1 && selectedRangeCorner2) {
-    const { row: corner1Row, col: corner1Col } = Util.asCoords(
-      selectedRangeCorner1
-    )
-    const { row: corner2Row, col: corner2Col } = Util.asCoords(
-      selectedRangeCorner2
-    )
-
-    let rangeCorners
-
-    if (corner1Row <= corner2Row) {
-      if (corner1Col <= corner2Col) {
-        // Corner 2 is below (or at the same row) and to the right (or at the same col) of corner 1.
-        rangeCorners = [selectedRangeCorner1, selectedRangeCorner2]
-      } else {
-        // Corner 2 is below (or at the same row) and to the left of corner 1.
-        rangeCorners = [
-          Util.asRef(corner1Row, corner2Col),
-          Util.asRef(corner2Row, corner1Col)
-        ]
-      }
-    } else {
-      if (corner1Col <= corner2Col) {
-        // Corner 2 is above and to the right (or at the same col) of corner 1.
-        rangeCorners = [
-          Util.asRef(corner2Row, corner1Col),
-          Util.asRef(corner1Row, corner2Col)
-        ]
-      } else {
-        // Corner 2 is above and to the left of corner 1.
-        rangeCorners = [selectedRangeCorner2, selectedRangeCorner1]
-      }
-    }
-
-    selectedRange = rangeCorners.join(":")
+    _gotoCell(ref, !refInSelectedRange)
   }
 
   const handleSelectAllClick = (_event) => {
-    const firstCell = Util.asRef(1, 1)
-    const lastCell = Util.asRef(...dimensions)
+    const firstCell = Util.asRef([1, 1])
+    const lastCell = Util.asRef(dimensions)
 
     setSelectedRangeCorner1(firstCell)
     setSelectedRangeCorner2(lastCell)
@@ -965,8 +1000,8 @@ const Spreadsheet = (props) => {
   }
 
   const handleSelectRowClick = (row) => (_event) => {
-    const firstRowCell = Util.asRef(row, 1)
-    const lastRowCell = Util.asRef(row, dimensions[1])
+    const firstRowCell = Util.asRef([row, 1])
+    const lastRowCell = Util.asRef([row, dimensions[1]])
 
     setSelectedRangeCorner1(firstRowCell)
     setSelectedRangeCorner2(lastRowCell)
@@ -975,8 +1010,8 @@ const Spreadsheet = (props) => {
   }
 
   const handleSelectColClick = (col) => (_event) => {
-    const firstColCell = Util.asRef(1, col)
-    const lastColCell = Util.asRef(dimensions[0], col)
+    const firstColCell = Util.asRef([1, col])
+    const lastColCell = Util.asRef([dimensions[0], col])
 
     setSelectedRangeCorner1(firstColCell)
     setSelectedRangeCorner2(lastColCell)
@@ -984,8 +1019,30 @@ const Spreadsheet = (props) => {
     _gotoCell(firstColCell)
   }
 
+  const isColumnFullySelected = (col) => {
+    const firstColCell = Util.asRef([1, col])
+    const lastColCell = Util.asRef([dimensions[0], col])
+
+    return (
+      selectedRangeRefs.indexOf(firstColCell) >= 0 &&
+      selectedRangeRefs.indexOf(lastColCell) >= 0
+    )
+  }
+
+  const isRowFullySelected = (row) => {
+    const firstRowCell = Util.asRef([row, 1])
+    const lastRowCell = Util.asRef([row, dimensions[1]])
+
+    return (
+      selectedRangeRefs.indexOf(firstRowCell) >= 0 &&
+      selectedRangeRefs.indexOf(lastRowCell) >= 0
+    )
+  }
+
   const showExtraRowHeader = dimensions[1] > HEADER_LIMITS.cols
   const showExtraColHeader = dimensions[0] > HEADER_LIMITS.rows
+
+  const highlightedLabelStyle = { backgroundColor: "Gray", color: "White" }
 
   const colHeaderColumns = (
     <tr style={{ backgroundColor: "lightgray" }}>
@@ -993,9 +1050,17 @@ const Spreadsheet = (props) => {
 
       {Util.sequenceMap(dimensions[1], (colBase0) => {
         const col = colBase0 + 1
+        const highlightedHeader = isColumnFullySelected(col)
+          ? highlightedLabelStyle
+          : {}
 
         return (
-          <th align="center" key={col} onClick={handleSelectColClick(col)}>
+          <th
+            align="center"
+            key={col}
+            onClick={handleSelectColClick(col)}
+            style={highlightedHeader}
+          >
             {Util.colAsLabel(col)}
             {col === dimensions[1] && (
               <>
@@ -1017,26 +1082,33 @@ const Spreadsheet = (props) => {
     </tr>
   )
 
-  const rowHeaderColumn = (row) => (
-    <th
-      style={{ backgroundColor: "LightGray" }}
-      onClick={handleSelectRowClick(row)}
-    >
-      {row}
-      {row === dimensions[0] && (
-        <>
-          <br />
-          <button
-            className="link-button"
-            title="Add new row"
-            onClick={handleAddNewRow}
-          >
-            [+]
-          </button>
-        </>
-      )}
-    </th>
-  )
+  const rowHeaderColumn = (row) => {
+    const defaultStyle = { backgroundColor: "LightGray" }
+    const highlightedHeader = isRowFullySelected(row)
+      ? highlightedLabelStyle
+      : {}
+
+    return (
+      <th
+        style={{ ...defaultStyle, ...highlightedHeader }}
+        onClick={handleSelectRowClick(row)}
+      >
+        {row}
+        {row === dimensions[0] && (
+          <>
+            <br />
+            <button
+              className="link-button"
+              title="Add new row"
+              onClick={handleAddNewRow}
+            >
+              [+]
+            </button>
+          </>
+        )}
+      </th>
+    )
+  }
 
   return (
     <>
@@ -1058,7 +1130,7 @@ const Spreadsheet = (props) => {
 
                 {Util.sequenceMap(dimensions[1], (colBase0) => {
                   const col = colBase0 + 1
-                  const ref = Util.asRef(row, col)
+                  const ref = Util.asRef([row, col])
                   const cell = sheet.findCell([row, col])
                   let cellColor
                   let selectedRangeCellStyle = {}
@@ -1069,24 +1141,23 @@ const Spreadsheet = (props) => {
                   else if (cell?.modified) cellColor = "Gold"
                   else cellColor = "White"
 
-                  if (
-                    selectedRange &&
-                    Util.expandRange(selectedRange).flat(2).indexOf(ref) >= 0
-                  )
+                  if (selectedRangeRefs.indexOf(ref) >= 0)
                     selectedRangeCellStyle = {
                       borderColor: "Blue",
-                      backgroundColor: "LightSteelBlue",
+                      backgroundColor: "#d8ecf3",
                       color: "Black"
                     }
 
                   if (
-                    clipboard &&
-                    Util.expandRange(clipboard).flat(2).indexOf(ref) >= 0
+                    clipboard.range &&
+                    Util.expandRange(clipboard.range).flat(2).indexOf(ref) >= 0
                   )
                     clipboardCellStyle = {
                       borderColor: "Blue",
                       color: "Black",
-                      borderStyle: "dashed",
+                      borderStyle: { cut: "dashed", copy: "dotted" }[
+                        clipboard.action
+                      ],
                       borderWidth: "2px"
                     }
 

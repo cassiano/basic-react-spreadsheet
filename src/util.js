@@ -69,12 +69,10 @@ const Util = (() => {
     return colRef
   }
 
-  const asRef = (row, col) => colAsLabel(col) + String(row)
-
-  const refOrCoordsAsRef = (refOrCoords) => {
+  const asRef = (refOrCoords) => {
     const { row, col } = asCoords(refOrCoords)
 
-    return asRef(row, col)
+    return colAsLabel(col) + String(row)
   }
 
   const _rowColFromRef = (ref) => {
@@ -174,10 +172,10 @@ const Util = (() => {
         Util.sequenceMap(
           bottomRightCoords.col - topLeftCoords.col + 1,
           (colIndex) =>
-            Util.asRef(
+            Util.asRef([
               topLeftCoords.row + rowIndex,
               topLeftCoords.col + colIndex
-            )
+            ])
         )
     )
   }
@@ -205,7 +203,7 @@ const Util = (() => {
 
     if (newRow < 1 || newCol < 1) return "[invalid ref]"
 
-    return asRef(newRow, newCol)
+    return asRef([newRow, newCol])
   }
 
   const setAppend = (targetSet, setOrArrayToAppend) => {
@@ -226,7 +224,7 @@ const Util = (() => {
       left: "west",
       walk: (ref, step = 1) => {
         const { row, col } = asCoords(ref)
-        return asRef(row > step ? row - step : row, col)
+        return asRef([row > step ? row - step : row, col])
       }
     },
     south: {
@@ -234,7 +232,7 @@ const Util = (() => {
       left: "east",
       walk: (ref, step = 1) => {
         const { row, col } = asCoords(ref)
-        return asRef(row + step, col)
+        return asRef([row + step, col])
       }
     },
     east: {
@@ -242,7 +240,7 @@ const Util = (() => {
       left: "north",
       walk: (ref, step = 1) => {
         const { row, col } = asCoords(ref)
-        return asRef(row, col + step)
+        return asRef([row, col + step])
       }
     },
     west: {
@@ -250,7 +248,7 @@ const Util = (() => {
       left: "south",
       walk: (ref, step = 1) => {
         const { row, col } = asCoords(ref)
-        return asRef(row, col > step ? col - step : col)
+        return asRef([row, col > step ? col - step : col])
       }
     }
   }
@@ -311,7 +309,7 @@ const Util = (() => {
         ...acc,
         ..._generateCellColsRows(
           side - i,
-          Util.asRef(i + row, i + col),
+          Util.asRef([i + row, i + col]),
           initialValue,
           row,
           col
@@ -414,6 +412,7 @@ const Util = (() => {
   }
 
   return {
+    RANGE_REGEXP,
     InvalidRefInFormula,
     sequence,
     sequenceForEach,
@@ -423,7 +422,6 @@ const Util = (() => {
     colIndexFromLabel,
     colAsLabel,
     asRef,
-    refOrCoordsAsRef,
     asCoords,
     isFormula,
     rawFormula,
